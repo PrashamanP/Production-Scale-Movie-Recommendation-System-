@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/interactions.schema.json",
+  "title": "Interactions Row",
+  "description": "One user–movie interaction from the Kafka-derived CSV.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["user_id", "movie_id", "rating", "timestamp"],
+  "properties": {
+    "user_id": {
+      "description": "Positive integer identifier of the user.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "movie_id": {
+      "description": "Slug ID of the movie (letters/digits and + _ - .), often words joined by '+'.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9+_\\-\\.]+(?:\\+[A-Za-z0-9+_\\-\\.]+)*$"
+    },
+    "rating": {
+      "description": "Discrete star rating 1–5. (Ingest converts watch events to 1.)",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "timestamp": {
+      "description": "Unix epoch seconds of ingestion (non-negative).",
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "examples": [
+    { "user_id": 123, "movie_id": "the+matrix+1999", "rating": 5, "timestamp": 1700000000 },
+    { "user_id": 456, "movie_id": "crouching+tiger_hidden+dragon+2000", "rating": 1, "timestamp": 1700000100 }
+  ]
+}

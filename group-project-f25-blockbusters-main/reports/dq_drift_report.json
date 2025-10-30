@@ -1,0 +1,93 @@
+{
+  "mode": "ref_vs_cur",
+  "current_path": "data/interactions_clean_cur.parquet",
+  "reference_path": "data/interactions_clean_ref.parquet",
+  "thresholds": {
+    "psi_moderate": 0.1,
+    "psi_strong": 0.25,
+    "min_rating_entropy": 0.1,
+    "max_top_rating_share": 0.99,
+    "top10_share_threshold": 0.5,
+    "gini_movies_threshold": 0.9,
+    "top100_overlap_threshold": 0.4,
+    "one_and_done_threshold": 0.9999,
+    "pop_top10_delta_moderate": 0.05,
+    "pop_top10_delta_strong": 0.08,
+    "pop_top100_delta_moderate": 0.1,
+    "pop_top100_delta_strong": 0.15,
+    "pop_gini_delta_moderate": 0.06,
+    "pop_gini_delta_strong": 0.1
+  },
+  "metrics": {
+    "rating_psi": {
+      "psi": 0.00023869222210486787,
+      "edges": [
+        1.0,
+        1.4,
+        1.8,
+        2.2,
+        2.6,
+        3.0,
+        3.4000000000000004,
+        3.8000000000000003,
+        4.2,
+        4.6,
+        5.0
+      ],
+      "severity": "none",
+      "drift_flag": false
+    },
+    "movie_popularity": {
+      "ref": {
+        "top10_share": 0.09221726125129434,
+        "top100_share": 0.45757490774671283,
+        "gini_movies": 0.8861460932517669
+      },
+      "cur": {
+        "top10_share": 0.05545986910093007,
+        "top100_share": 0.2584666108951331,
+        "gini_movies": 0.5677762148113581
+      },
+      "delta": {
+        "top10_share_delta": -0.03675739215036427,
+        "top100_share_delta": -0.1991082968515797,
+        "gini_movies_delta": -0.31836987844040876
+      },
+      "flags": {
+        "top10_concentration": false,
+        "gini_high": false,
+        "top10_delta_moderate": false,
+        "top10_delta_strong": false,
+        "top100_delta_moderate": true,
+        "top100_delta_strong": true,
+        "gini_delta_moderate": true,
+        "gini_delta_strong": true
+      }
+    },
+    "top100_overlap": {
+      "overlap": 0.44,
+      "flag_low_overlap": false
+    },
+    "user_activity": {
+      "ref": {
+        "active_users": 132296,
+        "one_and_done_share": 0.0030008465864425227,
+        "p95_events_per_user": 439.0
+      },
+      "cur": {
+        "active_users": 41758,
+        "one_and_done_share": 0.020618803582547057,
+        "p95_events_per_user": 6.0
+      },
+      "delta": {
+        "active_users_delta": -90538.0,
+        "one_and_done_share_delta": 0.017617956996104536,
+        "p95_events_per_user_delta": -433.0
+      },
+      "flags": {
+        "too_many_one_and_done": false
+      }
+    }
+  },
+  "drift_detected": true
+}

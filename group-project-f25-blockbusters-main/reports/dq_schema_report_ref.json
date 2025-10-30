@@ -1,0 +1,12 @@
+{
+  "input_path": "data/interactions_og.csv",
+  "output_path": "data/interactions_clean_ref.parquet",
+  "rejects_path": null,
+  "schema_path": "src/data_quality/schemas/interactions.schema.json",
+  "input_rows": 24351120,
+  "clean_rows": 24343577,
+  "reject_rows": 7543,
+  "reject_rate": 0.0003097598796277132,
+  "elapsed_sec": 941.9,
+  "chunksize": 250000
+}
