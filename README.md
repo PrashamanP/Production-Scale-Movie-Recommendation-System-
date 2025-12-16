@@ -1,4 +1,4 @@
-# Blockbusters - Movie recommendation service
+ Movie recommendation service
 This repo contains 2 models for recommending movies to users:
 1. Model 1: Alternating Least Squares
 2. Model 2: Popularity ranking + user-genre boost (Baseline model)
