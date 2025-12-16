@@ -1,0 +1,16 @@
+[run]
+source = src
+relative_files = True
+omit =
+    src/models/pop-gen/*
+    src/data_quality/*
+    src/evaluation/*
+    */__init__.py
+
+[report]
+skip_covered = False
+show_missing = True
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    ^\s*print

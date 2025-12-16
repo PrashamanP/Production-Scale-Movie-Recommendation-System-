@@ -1,0 +1,105 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $JOB_NAME
+  labels:
+    app: model-retraining
+spec:
+  # Don't automatically retry on failure - let Jenkins handle it
+  backoffLimit: 0
+  
+  # Clean up completed jobs after 1 hour
+  ttlSecondsAfterFinished: 3600
+  
+  template:
+    metadata:
+      labels:
+        app: model-retraining
+    spec:
+      hostNetwork: true
+      restartPolicy: Never
+      
+      containers:
+      - name: trainer
+        image: movie-recommender:latest
+        imagePullPolicy: Never
+        
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "=========================================="
+            echo "MODEL RETRAINING JOB"
+            echo "=========================================="
+            echo "Model Version: $MODEL_VERSION"
+            echo "Data Version: $DATA_VERSION"
+            echo "Git Commit: $GIT_COMMIT"
+            echo "Build Number: $BUILD_NUMBER"
+            echo "=========================================="
+            echo ""
+            
+            # Run the training pipeline
+            python3 /app/scripts/retrain_pipeline.py \
+              --model-version "$MODEL_VERSION" \
+              --data-version "$DATA_VERSION" \
+              --git-commit "$GIT_COMMIT" \
+              --build-number "$BUILD_NUMBER"
+            
+            echo ""
+            echo "=========================================="
+            echo "✅ TRAINING COMPLETED SUCCESSFULLY"
+            echo "=========================================="
+        
+        env:
+        - name: MODEL_VERSION
+          value: "${MODEL_VERSION}"
+        - name: DATA_VERSION
+          value: "${DATA_VERSION}"
+        - name: GIT_COMMIT
+          value: "${GIT_COMMIT}"
+        - name: BUILD_NUMBER
+          value: "${BUILD_NUMBER}"
+        - name: PIPELINE_GIT_COMMIT
+          value: "${GIT_COMMIT}"
+        - name: PIPELINE_GIT_BRANCH
+          value: "${GIT_BRANCH:-unknown}"
+        
+        # Mount directories for models and datasets
+        volumeMounts:
+        - name: models
+          mountPath: /home/mlprod/models
+        - name: datasets
+          mountPath: /home/mlprod/datasets
+        - name: keshar-data
+          mountPath: /home/mlprod/keshar_data
+          readOnly: true
+        - name: artifacts
+          mountPath: /home/mlprod/artifacts
+          readOnly: true
+        
+        # Higher resource limits for training
+        resources:
+          requests:
+            memory: "3Gi"
+            cpu: "1000m"
+          limits:
+            memory: "8Gi"
+            cpu: "2000m"
+      
+      volumes:
+      - name: models
+        hostPath:
+          path: /home/mlprod/models
+          type: Directory
+      - name: datasets
+        hostPath:
+          path: /home/mlprod/datasets
+          type: Directory
+      - name: keshar-data
+        hostPath:
+          path: /home/mlprod/keshar_data
+          type: Directory
+      - name: artifacts
+        hostPath:
+          path: /home/mlprod/artifacts
+          type: Directory

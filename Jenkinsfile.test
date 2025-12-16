@@ -1,0 +1,400 @@
+pipeline {
+    agent any
+    
+    options {
+        timestamps()
+        ansiColor('xterm')
+        timeout(time: 20, unit: 'MINUTES')  // Extended for deployment tests
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+    
+    environment {
+        IMAGE_NAME = 'movie-recommender'
+        CI_CONTEXT_TESTS = 'ci/jenkins/tests'
+        CI_CONTEXT_DEPLOY = 'ci/jenkins/deployment'
+        KUBECONFIG = '/etc/rancher/k3s/k3s.yaml'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: scm.branches,
+                    extensions: scm.extensions + [
+                        [$class: 'GitLFSPull'],
+                        [$class: 'CloneOption', depth: 0, noTags: false, shallow: false]
+                    ],
+                    userRemoteConfigs: scm.userRemoteConfigs
+                ])
+                echo "Testing commit: ${env.GIT_COMMIT}"
+                echo "Branch: ${env.GIT_BRANCH}"
+            }
+        }
+        
+        stage('Set PR status: pending') {
+            when { changeRequest() }
+            steps {
+                script {
+                    try {
+                        setGitHubPullRequestStatus(
+                            state: 'PENDING',
+                            context: env.CI_CONTEXT_TESTS,
+                            message: "Running tests (build #${env.BUILD_NUMBER})",
+                            sha: env.GIT_COMMIT,
+                            url: env.BUILD_URL
+                        )
+                        setGitHubPullRequestStatus(
+                            state: 'PENDING',
+                            context: env.CI_CONTEXT_DEPLOY,
+                            message: "Waiting for tests...",
+                            sha: env.GIT_COMMIT,
+                            url: env.BUILD_URL
+                        )
+                    } catch (e) {
+                        echo "⚠️  Could not set PR status (pending): ${e.message}"
+                    }
+                }
+            }
+        }
+        
+        stage('Build test image') {
+            steps {
+                echo 'Building Docker image with test dependencies...'
+                sh '''
+                    # Build up to test stage
+                    docker build \
+                        --target test \
+                        --tag ${IMAGE_NAME}:test-${BUILD_NUMBER} \
+                        --tag ${IMAGE_NAME}:test-latest \
+                        .
+                '''
+            }
+        }
+        
+        stage('Run tests in container') {
+            steps {
+                echo 'Running test suite with coverage inside Docker container...'
+                sh '''
+                    # Create reports directory on host
+                    mkdir -p reports
+                    
+                    # Run tests inside container, mount reports directory
+                    docker run --rm \
+                        -v "$(pwd)/reports:/app/reports" \
+                        ${IMAGE_NAME}:test-${BUILD_NUMBER} \
+                        pytest -v --maxfail=1 --disable-warnings \
+                            --junitxml=/app/reports/junit.xml \
+                            --cov=src \
+                            --cov-config=.coveragerc \
+                            --cov-report=xml:/app/reports/coverage.xml \
+                            --cov-report=term-missing \
+                            --cov-report=html:/app/reports/coverage-html \
+                            --cov-fail-under=70 \
+                            tests
+                    
+                    echo "✅ All tests passed with sufficient coverage"
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/**', 
+                                     fingerprint: true, 
+                                     onlyIfSuccessful: false,
+                                     allowEmptyArchive: true
+                    
+                    junit testResults: 'reports/junit.xml',
+                          allowEmptyResults: false,
+                          skipPublishingChecks: false
+                    
+                    recordCoverage tools: [[parser: 'COBERTURA', pattern: 'reports/coverage.xml']], 
+                                   failOnError: false,
+                                   sourceCodeRetention: 'MODIFIED'
+                }
+                success {
+                    script {
+                        if (env.CHANGE_ID) {
+                            try {
+                                setGitHubPullRequestStatus(
+                                    state: 'SUCCESS',
+                                    context: env.CI_CONTEXT_TESTS,
+                                    message: "All tests passed ✓",
+                                    sha: env.GIT_COMMIT,
+                                    url: env.BUILD_URL
+                                )
+                            } catch (e) {
+                                echo "⚠️  Could not set test status: ${e.message}"
+                            }
+                        }
+                    }
+                }
+                failure {
+                    script {
+                        if (env.CHANGE_ID) {
+                            try {
+                                setGitHubPullRequestStatus(
+                                    state: 'FAILURE',
+                                    context: env.CI_CONTEXT_TESTS,
+                                    message: "Tests failed ✗",
+                                    sha: env.GIT_COMMIT,
+                                    url: env.BUILD_URL
+                                )
+                            } catch (e) {
+                                echo "⚠️  Could not set test status: ${e.message}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build production image for PR') {
+            when { changeRequest() }
+            steps {
+                echo 'Building production Docker image for PR deployment test...'
+                sh '''
+                    docker build \
+                        --target production \
+                        --build-arg BUILD_NUMBER=${BUILD_NUMBER} \
+                        --build-arg GIT_COMMIT=${GIT_COMMIT} \
+                        --tag ${IMAGE_NAME}:pr-${CHANGE_ID}-${BUILD_NUMBER} \
+                        .
+                    
+                    echo "✅ PR image built: ${IMAGE_NAME}:pr-${CHANGE_ID}-${BUILD_NUMBER}"
+                '''
+            }
+        }
+        
+        stage('Import PR image to k3s') {
+            when { changeRequest() }
+            steps {
+                echo 'Importing PR image to k3s...'
+                sh '''
+                    # Save Docker image to tar
+                    docker save ${IMAGE_NAME}:pr-${CHANGE_ID}-${BUILD_NUMBER} -o /tmp/movie-recommender-pr-${CHANGE_ID}.tar
+                    
+                    # Import to k3s
+                    sudo k3s ctr images import /tmp/movie-recommender-pr-${CHANGE_ID}.tar
+                    
+                    # Clean up tar file
+                    rm /tmp/movie-recommender-pr-${CHANGE_ID}.tar
+                    
+                    echo "✅ PR image imported to k3s"
+                '''
+            }
+        }
+        
+        stage('Deploy to PR namespace') {
+            when { changeRequest() }
+            environment {
+                PR_NAMESPACE = "pr-${CHANGE_ID}"
+                PR_PORT = "${30100 + CHANGE_ID.toInteger()}"
+                PR_IMAGE = "${IMAGE_NAME}:pr-${CHANGE_ID}-${BUILD_NUMBER}"
+            }
+            steps {
+                script {
+                    try {
+                        setGitHubPullRequestStatus(
+                            state: 'PENDING',
+                            context: env.CI_CONTEXT_DEPLOY,
+                            message: "Deploying to test namespace...",
+                            sha: env.GIT_COMMIT,
+                            url: env.BUILD_URL
+                        )
+                    } catch (e) {
+                        echo "⚠️  Could not set deployment status: ${e.message}"
+                    }
+                }
+                
+                echo "Deploying to ephemeral namespace: ${PR_NAMESPACE}"
+                sh '''
+                    export KUBECONFIG=${KUBECONFIG}
+                    
+                    # Create namespace if it doesn't exist
+                    kubectl create namespace ${PR_NAMESPACE} 2>/dev/null || echo "Namespace ${PR_NAMESPACE} already exists"
+                    
+                    # Create deployment (1 replica for PR testing)
+                    cat k8s/deployment.yaml | \
+                        sed "s/replicas: 3/replicas: 1/g" | \
+                        sed "s/image: movie-recommender:latest/image: ${PR_IMAGE}/g" | \
+                        kubectl apply -n ${PR_NAMESPACE} -f -
+                    
+                    # Create service with unique NodePort
+                    cat k8s/service.yaml | \
+                        sed "s/30082/${PR_PORT}/g" | \
+                        kubectl apply -n ${PR_NAMESPACE} -f -
+                    
+                    echo "📦 Waiting for deployment to be ready..."
+                    kubectl rollout status deployment/movie-recommender -n ${PR_NAMESPACE} --timeout=5m
+                    
+                    echo "✅ PR deployment ready on port ${PR_PORT}"
+                    kubectl get pods -n ${PR_NAMESPACE}
+                '''
+            }
+        }
+        
+        stage('Smoke test PR deployment') {
+            when { changeRequest() }
+            environment {
+                PR_NAMESPACE = "pr-${CHANGE_ID}"
+                PR_PORT = "${30100 + CHANGE_ID.toInteger()}"
+            }
+            steps {
+                echo "🧪 Running smoke tests against PR deployment on port ${PR_PORT}..."
+                sh '''
+                    # Give service a moment to be fully ready
+                    sleep 10
+                    
+                    # Test 1: Health check
+                    echo "Test 1: Health endpoint..."
+                    HEALTH_RESPONSE=$(curl -sf http://localhost:${PR_PORT}/health || echo "FAILED")
+                    if [[ "$HEALTH_RESPONSE" == "FAILED" ]]; then
+                        echo "❌ Health check failed"
+                        exit 1
+                    fi
+                    echo "✅ Health check passed"
+                    
+                    # Test 2: Recommendation endpoint (verifies artifacts loaded)
+                    echo "Test 2: Recommendation endpoint..."
+                    RECOMMEND_RESPONSE=$(curl -sf http://localhost:${PR_PORT}/recommend/123 || echo "FAILED")
+                    if [[ "$RECOMMEND_RESPONSE" == "FAILED" ]]; then
+                        echo "❌ Recommendation endpoint failed"
+                        exit 1
+                    fi
+                    
+                    # Check for error messages in response
+                    if echo "$RECOMMEND_RESPONSE" | grep -iq "error"; then
+                        echo "❌ Recommendation returned error:"
+                        echo "$RECOMMEND_RESPONSE"
+                        exit 1
+                    fi
+                    echo "✅ Recommendation endpoint passed"
+                    
+                    # Test 3: Verify artifacts loaded
+                    echo "Test 3: Checking logs for artifact loading..."
+                    export KUBECONFIG=${KUBECONFIG}
+                    POD_NAME=$(kubectl get pods -n ${PR_NAMESPACE} -l app=movie-recommender -o jsonpath='{.items[0].metadata.name}')
+                    LOGS=$(kubectl logs $POD_NAME -n ${PR_NAMESPACE} --tail=100)
+                    
+                    if echo "$LOGS" | grep -q "FileNotFoundError\\|No such file"; then
+                        echo "❌ Missing artifact files detected in logs"
+                        echo "$LOGS"
+                        exit 1
+                    fi
+                    echo "✅ No missing artifact errors"
+                    
+                    echo ""
+                    echo "🎉 All smoke tests passed!"
+                    echo "PR deployment is healthy and serving traffic correctly."
+                '''
+            }
+            post {
+                always {
+                    script {
+                        def prNamespace = "pr-${env.CHANGE_ID}"
+                        sh """
+                            export KUBECONFIG=${KUBECONFIG}
+                            echo "📋 Deployment logs from PR namespace:"
+                            kubectl logs -l app=movie-recommender -n ${prNamespace} --tail=100 || true
+                        """
+                    }
+                }
+                success {
+                    script {
+                        if (env.CHANGE_ID) {
+                            try {
+                                setGitHubPullRequestStatus(
+                                    state: 'SUCCESS',
+                                    context: env.CI_CONTEXT_DEPLOY,
+                                    message: "Deployment validated ✓",
+                                    sha: env.GIT_COMMIT,
+                                    url: env.BUILD_URL
+                                )
+                            } catch (e) {
+                                echo "⚠️  Could not set deployment status: ${e.message}"
+                            }
+                        }
+                    }
+                }
+                failure {
+                    script {
+                        if (env.CHANGE_ID) {
+                            try {
+                                setGitHubPullRequestStatus(
+                                    state: 'FAILURE',
+                                    context: env.CI_CONTEXT_DEPLOY,
+                                    message: "Deployment failed ✗",
+                                    sha: env.GIT_COMMIT,
+                                    url: env.BUILD_URL
+                                )
+                            } catch (e) {
+                                echo "⚠️  Could not set deployment status: ${e.message}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build production image') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'Building production Docker image...'
+                sh '''
+                    # Build production stage (only on main branch)
+                    docker build \
+                        --target production \
+                        --build-arg BUILD_NUMBER=${BUILD_NUMBER} \
+                        --build-arg GIT_COMMIT=${GIT_COMMIT} \
+                        --tag ${IMAGE_NAME}:${BUILD_NUMBER} \
+                        --tag ${IMAGE_NAME}:latest \
+                        .
+                    
+                    echo "✅ Production image built successfully"
+                '''
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "✅ Build #${env.BUILD_NUMBER} completed successfully"
+        }
+        
+        failure {
+            echo "❌ Build #${env.BUILD_NUMBER} failed"
+        }
+        
+        cleanup {
+            echo 'Cleaning up Docker images, reports, and PR namespace...'
+            sh '''
+                # Clean up test images
+                docker rmi ${IMAGE_NAME}:test-${BUILD_NUMBER} || true
+                
+                # Clean up PR image if it exists
+                if [ -n "${CHANGE_ID}" ]; then
+                    docker rmi ${IMAGE_NAME}:pr-${CHANGE_ID}-${BUILD_NUMBER} || true
+                    
+                    # Clean up PR namespace
+                    PR_NAMESPACE="pr-${CHANGE_ID}"
+                    export KUBECONFIG=${KUBECONFIG}
+                    
+                    echo "🧹 Cleaning up namespace: ${PR_NAMESPACE}"
+                    kubectl delete namespace ${PR_NAMESPACE} --ignore-not-found=true || true
+                    
+                    echo "✓ PR namespace cleaned up"
+                fi
+                
+                # Clean up old dangling images
+                docker image prune -f
+                
+                # Clean up reports directory
+                sudo rm -rf reports/
+                
+                echo "✓ Cleanup complete"
+            '''
+        }
+    }
+}

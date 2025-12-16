@@ -1,0 +1,65 @@
+{
+  "log_file": "data/raw.log",
+  "window_hours": 0.01,
+  "top_k": 50,
+  "num_windows": 4,
+  "mean_unique_recs": 242.5,
+  "mean_gini_recs": 0.5762425279428212,
+  "popularity_reinforcement": {
+    "avg_delta_watch_share": -0.0001406110963382834,
+    "window_results": [
+      {
+        "window_index": 1,
+        "window_start": "2025-12-07T23:57:18+00:00",
+        "prev_watch_share_topk": 0.5388569223212406,
+        "next_watch_share_topk": 0.5368435739574795,
+        "delta_watch_share": -0.0020133483637611027,
+        "topk": 50,
+        "unique_recs": 254
+      },
+      {
+        "window_index": 2,
+        "window_start": "2025-12-07T23:57:54+00:00",
+        "prev_watch_share_topk": 0.5294476708697397,
+        "next_watch_share_topk": 0.5311797970408242,
+        "delta_watch_share": 0.001732126171084536,
+        "topk": 50,
+        "unique_recs": 236
+      }
+    ]
+  },
+  "window_summaries": [
+    {
+      "start": "2025-12-07 23:56:42+00:00",
+      "end": "2025-12-07 23:57:18+00:00",
+      "coverage": 249,
+      "gini": 0.587374971584451,
+      "rec_count": 8480,
+      "watch_count": 57004
+    },
+    {
+      "start": "2025-12-07 23:57:18+00:00",
+      "end": "2025-12-07 23:57:54+00:00",
+      "coverage": 254,
+      "gini": 0.5664112026599923,
+      "rec_count": 8620,
+      "watch_count": 57339
+    },
+    {
+      "start": "2025-12-07 23:57:54+00:00",
+      "end": "2025-12-07 23:58:30+00:00",
+      "coverage": 236,
+      "gini": 0.5518460205418656,
+      "rec_count": 8020,
+      "watch_count": 57337
+    },
+    {
+      "start": "2025-12-07 23:58:30+00:00",
+      "end": "2025-12-07 23:58:30+00:00",
+      "coverage": 231,
+      "gini": 0.5993379169849757,
+      "rec_count": 3400,
+      "watch_count": 25818
+    }
+  ]
+}

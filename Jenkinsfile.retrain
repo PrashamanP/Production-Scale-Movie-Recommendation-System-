@@ -1,0 +1,322 @@
+pipeline {
+    agent any
+    
+    triggers {
+        // Run every 3 days at 2 AM
+        cron('0 2 */3 * *')
+    }
+    
+    environment {
+        MODEL_VERSION = "v${new Date().format('yyyyMMdd_HHmmss')}"
+        DATA_VERSION = "data_${new Date().format('yyyyMMdd_HHmmss')}"
+        JOB_NAME = "model-retrain-${BUILD_NUMBER}"
+        KUBECONFIG = "/etc/rancher/k3s/k3s.yaml"
+    }
+    
+    stages {
+        stage('Prepare') {
+            steps {
+                echo "="*60
+                echo "AUTOMATED MODEL RETRAINING"
+                echo "="*60
+                echo "Model version: ${MODEL_VERSION}"
+                echo "Data version: ${DATA_VERSION}"
+                echo "Jenkins build: ${BUILD_NUMBER}"
+                echo "Git commit: ${GIT_COMMIT}"
+                echo "="*60
+            }
+        }
+
+        stage('Build Training Image') {
+            steps {
+                sh '''
+                    echo "Building Docker image from Jenkins workspace..."
+                    docker build --no-cache -t movie-recommender:latest --target production .
+                    echo "✅ Docker image built"
+                '''
+            }
+        }
+        
+        stage('Import Image to k3s') {
+            steps {
+                sh '''
+                    echo "Importing image to k3s containerd..."
+                    docker save movie-recommender:latest | sudo k3s ctr images import -
+                    echo "✅ Image imported to k3s"
+                '''
+            }
+        }
+        
+        
+        stage('Launch Training Job') {
+            steps {
+                script {
+                    sh '''#!/bin/bash
+                        export MODEL_VERSION="${MODEL_VERSION}"
+                        export DATA_VERSION="${DATA_VERSION}"
+                        export GIT_COMMIT="${GIT_COMMIT}"
+                        export BUILD_NUMBER="${BUILD_NUMBER}"
+                        export JOB_NAME="model-retrain-${BUILD_NUMBER}"
+                        
+                        # Use envsubst to replace all $VARIABLE references
+                        cat k8s/retrain-job.yaml | envsubst | kubectl apply -f -
+                        
+                        echo "✅ Created K8s Job: ${JOB_NAME}"
+                    '''
+                }
+            }
+        }
+        
+        stage('Wait for Training') {
+            steps {
+                timeout(time: 60, unit: 'MINUTES') {
+                    script {
+                        sh """
+                            echo "Waiting for job to complete (max 60 minutes)..."
+                            
+                            # Wait for either complete or failed
+                            kubectl wait --for=condition=complete job/${JOB_NAME} --timeout=60m || \
+                            kubectl wait --for=condition=failed job/${JOB_NAME} --timeout=1s
+                            
+                            # Get pod name
+                            POD_NAME=\$(kubectl get pods --selector=job-name=${JOB_NAME} -o jsonpath='{.items[0].metadata.name}')
+                            echo "Training pod: \${POD_NAME}"
+                            
+                            # Capture logs before pod is deleted
+                            echo "Capturing training logs..."
+                            kubectl logs \${POD_NAME} > training-${BUILD_NUMBER}.log || true
+                            
+                            # Check if job succeeded or failed
+                            if kubectl get job ${JOB_NAME} -o jsonpath='{.status.succeeded}' | grep -q 1; then
+                                echo "✅ Training job completed successfully"
+                            else
+                                echo "❌ Training job failed - printing logs:"
+                                echo "================================================"
+                                cat training-${BUILD_NUMBER}.log
+                                echo "================================================"
+                                exit 1
+                            fi
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Check Evaluation Results') {
+            steps {
+                script {
+                    sh """
+                        echo "Reading evaluation results..."
+                        
+                        # Check if file exists first
+                        if ssh -o StrictHostKeyChecking=no mlprod@localhost \
+                            "test -f /home/mlprod/models/${MODEL_VERSION}/eval_results.json"; then
+                            ssh -o StrictHostKeyChecking=no mlprod@localhost \
+                                "cat /home/mlprod/models/${MODEL_VERSION}/eval_results.json" \
+                                > eval_results.json
+                        else
+                            echo "❌ ERROR: eval_results.json not found - training may have failed"
+                            exit 1
+                        fi
+                    """
+                    
+                    def evalResults = readJSON file: 'eval_results.json'
+                    def hitAt20 = evalResults.hit_at_20
+                    def qualityGatePassed = evalResults.quality_gate_passed
+                    
+                    echo "="*60
+                    echo "EVALUATION RESULTS"
+                    echo "="*60
+                    echo "Hit@20: ${hitAt20}"
+                    echo "Quality Gate: ${qualityGatePassed ? '✅ PASSED' : '❌ FAILED'}"
+                    echo "="*60
+                    
+                    if (!qualityGatePassed) {
+                        error("Quality gate failed: Hit@20 (${hitAt20}) below threshold")
+                    }
+                    
+                    echo "✅ Model passed quality gate"
+                }
+            }
+        }
+        
+        stage('Verify Deployment Configuration') {
+            steps {
+                script {
+                    sh '''#!/bin/bash
+                        echo "Verifying deployment mounts 'latest' directory..."
+                        
+                        # Get the actual mount path from the deployment
+                        MOUNT_PATH=$(kubectl get deployment movie-recommender \
+                            -o jsonpath='{.spec.template.spec.volumes[?(@.name=="models")].hostPath.path}')
+                        
+                        echo "Current mount path: ${MOUNT_PATH}"
+                        
+                        # Verify it points to latest
+                        if [[ "${MOUNT_PATH}" == *"latest"* ]]; then
+                            echo "✅ Deployment correctly configured for versioned models"
+                        else
+                            echo "⚠️  WARNING: Deployment not configured for versioned models!"
+                            echo "   Current: ${MOUNT_PATH}"
+                            echo "   Expected: /home/mlprod/models/latest/"
+                            exit 1
+                        fi
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy New Model') {
+            steps {
+                sh """#!/bin/bash
+                    echo "Deploying model ${MODEL_VERSION}..."
+                    
+                    # Update symlink atomically (two-step for safety)
+                    ssh -o StrictHostKeyChecking=no mlprod@localhost '
+                        # Create new symlink with temporary name
+                        ln -sfn /home/mlprod/models/${MODEL_VERSION} \
+                            /home/mlprod/models/latest_candidate
+                        
+                        # Atomically replace old symlink
+                        mv -Tf /home/mlprod/models/latest_candidate \
+                            /home/mlprod/models/latest
+                        
+                        # Verify (POSIX-safe)
+                        CURRENT=\$(readlink /home/mlprod/models/latest)
+                        echo "✅ Updated symlink: latest -> \${CURRENT}"
+                        
+                        # POSIX-safe pattern matching
+                        case "\${CURRENT}" in
+                            *${MODEL_VERSION}*)
+                                echo "✅ Symlink verified"
+                                ;;
+                            *)
+                                echo "❌ ERROR: Symlink update failed!"
+                                echo "   Expected: ${MODEL_VERSION}"
+                                echo "   Got: \${CURRENT}"
+                                exit 1
+                                ;;
+                        esac
+                    '
+                    
+                    # Trigger rolling restart to pick up new model
+                    kubectl rollout restart deployment/movie-recommender
+                    
+                    echo "Waiting for rollout to complete..."
+                    kubectl rollout status deployment/movie-recommender --timeout=5m
+                    
+                    # Verify pods are healthy
+                    READY_PODS=\$(kubectl get deployment movie-recommender \
+                        -o jsonpath='{.status.readyReplicas}')
+                    DESIRED_PODS=\$(kubectl get deployment movie-recommender \
+                        -o jsonpath='{.spec.replicas}')
+                    
+                    echo "Ready pods: \${READY_PODS}/\${DESIRED_PODS}"
+                    
+                    if [ "\${READY_PODS}" != "\${DESIRED_PODS}" ]; then
+                        echo "❌ ERROR: Not all pods are ready after deployment!"
+                        exit 1
+                    fi
+                    
+                    echo "✅ Deployment complete - all pods healthy"
+                """
+            }
+        }
+        
+        stage('Update Provenance') {
+            steps {
+                script {
+                    echo "Updating provenance with deployment info..."
+                    
+                    sh """#!/bin/bash
+                        sudo -u jenkins python3 << 'PYTHON'
+import json
+from datetime import datetime
+
+prov_path = "/home/mlprod/models/${MODEL_VERSION}/provenance.json"
+
+with open(prov_path, "r") as f:
+    prov = json.load(f)
+
+prov["deployed_at"] = datetime.now().isoformat()
+prov["deployment_build"] = "${BUILD_NUMBER}"
+
+with open(prov_path, "w") as f:
+    json.dump(prov, f, indent=2)
+
+print("✅ Updated provenance metadata")
+PYTHON
+                    """
+                }
+            }
+        }
+        
+        stage('Cleanup Old Datasets') {
+            steps {
+                script {
+                    // Keep only last 5 dataset versions
+                    sh '''#!/bin/bash
+                        ssh -o StrictHostKeyChecking=no mlprod@localhost '
+                            cd /home/mlprod/datasets
+                            ls -t | grep -v "^baseline$" | tail -n +6 | xargs -r rm -rf
+                            echo "✅ Cleaned up old datasets (kept last 5, protected baseline)"
+                        ' || echo 'Warning: Cleanup failed (non-critical)'
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                // Archive training logs (already captured in Wait for Training stage)
+                sh """
+                    if [ -f training-${BUILD_NUMBER}.log ]; then
+                        echo "Archiving training logs..."
+                    fi
+                """
+                
+                archiveArtifacts artifacts: 'training-*.log, eval_results.json', 
+                                fingerprint: true,
+                                allowEmptyArchive: true
+                
+                // Cleanup K8s job (keeps logs in Jenkins)
+                sh """
+                    echo "Cleaning up Kubernetes job..."
+                    kubectl delete job/${JOB_NAME} --ignore-not-found=true || true
+                """
+            }
+        }
+        
+        success {
+            echo """
+                ✅ RETRAINING SUCCEEDED
+                =====================================
+                Model version: ${MODEL_VERSION}
+                Data version: ${DATA_VERSION}
+                Build: ${BUILD_NUMBER}
+                Git commit: ${GIT_COMMIT}
+                Deployed: ${new Date().format('yyyy-MM-dd HH:mm:ss')}
+                =====================================
+            """
+        }
+        
+        failure {
+            echo """
+                ❌ RETRAINING FAILED
+                =====================================
+                Build: ${BUILD_NUMBER}
+                Model version: ${MODEL_VERSION}
+                Check logs: ${BUILD_URL}console
+                Artifacts: ${BUILD_URL}artifact/
+                =====================================
+            """
+        }
+        
+        cleanup {
+            // Cleanup workspace
+            cleanWs()
+        }
+    }
+}

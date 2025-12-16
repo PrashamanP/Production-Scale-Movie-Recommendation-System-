@@ -1,0 +1,301 @@
+---
+# ConfigMap: Prometheus Configuration with Kubernetes Service Discovery
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: default
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+                - alertmanager:9093
+
+    rule_files:
+      - '/etc/prometheus/rules/*.yml'
+
+    scrape_configs:
+      # Kubernetes Service Discovery for movie-recommender pods
+      - job_name: 'flask_app'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - default
+        relabel_configs:
+          # Only scrape pods with app=movie-recommender label
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: movie-recommender
+          # Use pod name as instance label
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: instance
+          # Set the scrape address to pod IP + port
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:8082
+        metrics_path: '/metrics'
+        scrape_interval: 15s
+
+      # Prometheus itself
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+---
+# ConfigMap: Prometheus Alert Rules (from Cynthia's monitoring/prometheus_rules.yml)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: default
+data:
+  prometheus_rules.yml: |
+    groups:
+      - name: service_health
+        interval: 30s
+        rules:
+          - alert: ServiceDown
+            expr: up{job="flask_app"} == 0
+            for: 1m
+            labels:
+              severity: critical
+              component: service
+            annotations:
+              summary: "Flask recommendation service is down"
+              description: "Pod {{ $labels.instance }} has been down for more than 1 minute"
+
+          - alert: HighLatency
+            expr: sum by (instance) (rate(flask_http_request_duration_seconds_sum{job="flask_app"}[5m])) / sum by (instance) (rate(flask_http_request_duration_seconds_count{job="flask_app"}[5m])) > 0.5
+            for: 5m
+            labels:
+              severity: warning
+              component: performance
+            annotations:
+              summary: "High request latency detected"
+              description: "Average latency is {{ $value }}s (threshold: 0.5s) on instance {{ $labels.instance }}"
+
+          - alert: HighErrorRate
+            expr: rate(flask_http_request_total{job="flask_app",status=~"5.."}[5m]) / rate(flask_http_request_total{job="flask_app"}[5m]) > 0.05
+            for: 5m
+            labels:
+              severity: critical
+              component: errors
+            annotations:
+              summary: "High error rate detected"
+              description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+
+          - alert: LowUptime
+            expr: avg_over_time(up{job="flask_app"}[1h]) < 0.95
+            for: 1h
+            labels:
+              severity: warning
+              component: availability
+            annotations:
+              summary: "Low service uptime"
+              description: "Uptime is {{ $value | humanizePercentage }} over the last hour (threshold: 95%)"
+
+      - name: model_quality
+        interval: 60s
+        rules:
+          - alert: LowModelAccuracy
+            expr: model_hit_at_20 < 0.30
+            for: 10m
+            labels:
+              severity: warning
+              component: model_quality
+            annotations:
+              summary: "Model accuracy below threshold"
+              description: "Hit@20 is {{ $value }} (threshold: 0.30). Model may need retraining."
+
+      - name: data_drift
+        interval: 60s
+        rules:
+          - alert: HighRatingDrift
+            expr: data_drift_rating_psi > 0.25
+            for: 10m
+            labels:
+              severity: warning
+              component: data_drift
+            annotations:
+              summary: "Strong rating distribution drift detected"
+              description: "Rating PSI is {{ $value }} (threshold: 0.25). Consider retraining."
+
+          - alert: ExtremePopularityConcentration
+            expr: data_drift_movie_popularity_gini > 0.90
+            for: 15m
+            labels:
+              severity: warning
+              component: data_drift
+            annotations:
+              summary: "Extreme movie popularity concentration"
+              description: "Gini coefficient is {{ $value }} (threshold: 0.90). System may be filter bubbling."
+
+          - alert: Top10Concentration
+            expr: data_drift_top10_share > 0.50
+            for: 15m
+            labels:
+              severity: info
+              component: data_drift
+            annotations:
+              summary: "High concentration in top 10 movies"
+              description: "Top 10 movies account for {{ $value | humanizePercentage }} of interactions"
+
+          - alert: DataDriftDetected
+            expr: data_drift_detected == 1
+            for: 5m
+            labels:
+              severity: warning
+              component: data_drift
+            annotations:
+              summary: "Data drift detected by composite metrics"
+              description: "One or more drift thresholds exceeded. Review drift metrics dashboard."
+
+---
+# ServiceAccount: Prometheus needs permissions to discover pods
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: default
+
+---
+# ClusterRole: Define what Prometheus can read from K8s API
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  - nodes/proxy
+  - services
+  - endpoints
+  - pods
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses
+  verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding: Bind the prometheus ServiceAccount to the ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: default
+
+---
+# Deployment: Prometheus pod
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: default
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+      - name: prometheus
+        image: prom/prometheus:latest
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus'
+          - '--web.console.libraries=/etc/prometheus/console_libraries'
+          - '--web.console.templates=/etc/prometheus/consoles'
+          - '--storage.tsdb.retention.time=3d'
+          - '--storage.tsdb.retention.size=2GB'
+          - '--web.enable-lifecycle'
+        ports:
+        - containerPort: 9090
+          name: http
+        volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus/prometheus.yml
+          subPath: prometheus.yml
+        - name: prometheus-rules
+          mountPath: /etc/prometheus/rules
+        - name: prometheus-storage
+          mountPath: /prometheus
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "3Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9090
+          initialDelaySeconds: 240
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9090
+          initialDelaySeconds: 240
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: prometheus-config
+        configMap:
+          name: prometheus-config
+      - name: prometheus-rules
+        configMap:
+          name: prometheus-rules
+      - name: prometheus-storage
+        hostPath:
+          path: /home/mlprod/monitoring/prometheus
+          type: DirectoryOrCreate
+
+---
+# Service: Expose Prometheus on NodePort 30090
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: default
+  labels:
+    app: prometheus
+spec:
+  type: NodePort
+  ports:
+  - port: 9090
+    targetPort: 9090
+    nodePort: 30090
+    protocol: TCP
+    name: http
+  selector:
+    app: prometheus

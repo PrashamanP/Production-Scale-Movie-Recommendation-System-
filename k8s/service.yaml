@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: movie-recommender
+  labels:
+    app: movie-recommender
+spec:
+  type: NodePort
+  ports:
+  - port: 8082
+    targetPort: 8082
+    nodePort: 30082  # External access port
+    protocol: TCP
+    name: http
+  selector:
+    app: movie-recommender

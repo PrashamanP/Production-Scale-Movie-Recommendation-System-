@@ -1,0 +1,19 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "RecommendResponse",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["userid", "recommendations", "latency_ms"],
+    "properties": {
+      "userid": { "type": "integer", "minimum": 0 },
+      "recommendations": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "uniqueItems": true,
+        "items": { "type": "integer", "minimum": 0 }
+      },
+      "latency_ms": { "type": "number", "minimum": 0 }
+    }
+  }
+  

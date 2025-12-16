@@ -1,0 +1,124 @@
+---
+# ConfigMap: Alertmanager Configuration (reuses Cynthia's monitoring/alertmanager.yml)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: default
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+
+    route:
+      group_by: ['alertname', 'severity']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 12h
+      receiver: 'console-notifications'
+
+    receivers:
+      - name: 'console-notifications'
+        # For M3 demo, alerts just log to console
+        # To add Slack: uncomment and add your webhook URL
+        # slack_configs:
+        #   - api_url: 'YOUR_SLACK_WEBHOOK_URL'
+        #     channel: '#alerts'
+        #     send_resolved: true
+        #     title: 'Alert: {{ .GroupLabels.alertname }}'
+        #     text: |-
+        #       {{ range .Alerts }}
+        #       *Alert:* {{ .Labels.alertname }}
+        #       *Severity:* {{ .Labels.severity }}
+        #       *Summary:* {{ .Annotations.summary }}
+        #       *Description:* {{ .Annotations.description }}
+        #       *Status:* {{ .Status }}
+        #       {{ end }}
+
+    inhibit_rules:
+      - source_match:
+          severity: 'critical'
+        target_match:
+          severity: 'warning'
+        equal: ['alertname']
+
+---
+# Deployment: Alertmanager pod
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: default
+  labels:
+    app: alertmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      containers:
+      - name: alertmanager
+        image: prom/alertmanager:latest
+        args:
+          - '--config.file=/etc/alertmanager/alertmanager.yml'
+          - '--storage.path=/alertmanager'
+        ports:
+        - containerPort: 9093
+          name: http
+        volumeMounts:
+        - name: alertmanager-config
+          mountPath: /etc/alertmanager
+        - name: alertmanager-storage
+          mountPath: /alertmanager
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "100m"
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9093
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9093
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: alertmanager-config
+        configMap:
+          name: alertmanager-config
+      - name: alertmanager-storage
+        hostPath:
+          path: /home/mlprod/monitoring/alertmanager
+          type: DirectoryOrCreate
+
+---
+# Service: Expose Alertmanager on NodePort 30093
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: default
+  labels:
+    app: alertmanager
+spec:
+  type: NodePort
+  ports:
+  - port: 9093
+    targetPort: 9093
+    nodePort: 30093
+    protocol: TCP
+    name: http
+  selector:
+    app: alertmanager

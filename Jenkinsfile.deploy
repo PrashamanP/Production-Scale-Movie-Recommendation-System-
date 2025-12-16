@@ -1,0 +1,120 @@
+pipeline {
+    agent any
+    
+    options {
+        timestamps()
+        ansiColor('xterm')
+        timeout(time: 15, unit: 'MINUTES')
+    }
+    
+    environment {
+        DOCKER_BUILDKIT = '1'
+        IMAGE_NAME = 'movie-recommender'
+        KUBECONFIG = '/etc/rancher/k3s/k3s.yaml'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                echo "Deploying commit: ${env.GIT_COMMIT}"
+                echo "Build number: ${env.BUILD_NUMBER}"
+            }
+        }
+        
+        stage('Build production image') {
+            steps {
+                echo 'Building production Docker image with BuildKit...'
+                sh '''
+                    export DOCKER_BUILDKIT=1
+                    BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                    docker build \
+                        --target production \
+                        --build-arg BUILD_NUMBER=${BUILD_NUMBER} \
+                        --build-arg GIT_COMMIT=${GIT_COMMIT} \
+                        --build-arg BUILD_TIMESTAMP="${BUILD_TIMESTAMP}" \
+                        --tag ${IMAGE_NAME}:${BUILD_NUMBER} \
+                        --tag ${IMAGE_NAME}:latest \
+                        .
+                '''
+            }
+        }
+        
+        stage('Security Scan') {
+            steps {
+                echo 'Scanning image for vulnerabilities...'
+                sh '''
+                    trivy image --severity HIGH,CRITICAL \
+                        --exit-code 0 \
+                        --no-progress \
+                        ${IMAGE_NAME}:${BUILD_NUMBER} \
+                        > trivy-report-${BUILD_NUMBER}.txt || true
+                    
+                    echo "Security scan completed. High/Critical vulnerabilities:"
+                    trivy image --severity HIGH,CRITICAL \
+                        --format table \
+                        ${IMAGE_NAME}:${BUILD_NUMBER} || true
+                '''
+            }
+        }
+        
+        stage('Deploy to Kubernetes') {
+            steps {
+                echo 'Deploying to Kubernetes...'
+                sh '''
+                    chmod +x scripts/k8s-deploy.sh
+                    ./scripts/k8s-deploy.sh ${BUILD_NUMBER} ${GIT_COMMIT}
+                '''
+            }
+        }
+        
+        stage('Verify Deployment') {
+            steps {
+                echo 'Verifying deployment health...'
+                sh '''
+                    export KUBECONFIG=${KUBECONFIG}
+                    
+                    kubectl get pods -l app=movie-recommender
+                    
+                    sleep 5
+                    
+                    HEALTH_RESPONSE=$(curl -sf http://localhost:8082/health)
+                    echo "Health response: ${HEALTH_RESPONSE}"
+                    
+                    if [ -z "$HEALTH_RESPONSE" ]; then
+                        echo "ERROR: Health endpoint returned empty response"
+                        exit 1
+                    fi
+                    
+                    RECOMMEND_RESPONSE=$(curl -sf http://localhost:8082/recommend/123)
+                    echo "Recommendation response received (length: $(echo $RECOMMEND_RESPONSE | wc -c) characters)"
+                    
+                    if [ -z "$RECOMMEND_RESPONSE" ]; then
+                        echo "ERROR: Recommendation endpoint returned empty response"
+                        exit 1
+                    fi
+                    
+                    echo "✅ Deployment verified successfully!"
+                '''
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "✅ Deployment completed successfully!"
+            sh '''
+                export KUBECONFIG=${KUBECONFIG}
+                kubectl get deployment movie-recommender
+                kubectl get pods -l app=movie-recommender
+            '''
+        }
+        failure {
+            echo "❌ Deployment failed! Attempting rollback..."
+            sh '''
+                chmod +x scripts/k8s-rollback.sh
+                ./scripts/k8s-rollback.sh || echo "WARNING: Rollback failed"
+            '''
+        }
+    }
+}

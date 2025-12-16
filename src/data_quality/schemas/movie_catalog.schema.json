@@ -1,0 +1,19 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "MovieCatalogEntry",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["movie_id", "title", "genres"],
+    "properties": {
+      "movie_id": { "type": "integer", "minimum": 0 },
+      "title": { "type": "string", "minLength": 1 },
+      "genres": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 },
+        "uniqueItems": true
+      },
+      "year": { "type": "integer", "minimum": 1888, "maximum": 2025 },
+      "runtime_minutes": { "type": "number", "minimum": 0 }
+    }
+  }
+  

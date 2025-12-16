@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: movie-recommender
+  labels:
+    app: movie-recommender
+spec:
+  replicas: 3
+  
+  # Rolling update configuration for <60s deployments with zero downtime
+  minReadySeconds: 15  # Require 15s of stability before marking pod ready
+  progressDeadlineSeconds: 300  # Fail deployment if stuck for 5 minutes
+  
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2        # Allow 2 extra pods during rollout for parallel updates
+      maxUnavailable: 0  # Never terminate old pods until new ones are ready
+  
+  selector:
+    matchLabels:
+      app: movie-recommender
+  
+  template:
+    metadata:
+      labels:
+        app: movie-recommender
+    spec:
+      containers:
+      - name: recommender
+        image: movie-recommender:latest
+        imagePullPolicy: Never  # Use local image
+        
+        ports:
+        - containerPort: 8082
+          name: http
+        
+        # Startup probe prevents liveness probe from killing pods during slow initialization
+        # Critical for when PopGen artifacts take time to load
+        startupProbe:
+          httpGet:
+            path: /health/ready
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 3
+          timeoutSeconds: 5  # Allow slow PHP responses
+          failureThreshold: 10  # Allow up to 30s for startup (10 × 3s)
+        
+        # Liveness probe restarts pods that are running but broken
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8082
+          initialDelaySeconds: 10  # Short delay since startup probe handles slow starts
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        # Readiness probe controls when pod receives traffic from service
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8082
+          initialDelaySeconds: 5   # Start checking quickly
+          periodSeconds: 2         # Check frequently during rollouts
+          timeoutSeconds: 5
+          failureThreshold: 3      # Allow 3 failures before marking unready
+          successThreshold: 2      # Require 2 consecutive passes before routing traffic
+        
+        # Graceful shutdown: wait 5s for load balancer to stop routing traffic
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 5"]
+        
+        # Resource limits
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        
+        env:
+        - name: MODEL_VERSION
+          value: "v1"
+        - name: BUILD_NUMBER
+          value: "1"
+        - name: GIT_COMMIT
+          value: "initial"
+        
+        # Mount models from host
+        volumeMounts:
+        - name: models
+          mountPath: /app/models
+          readOnly: true
+        - name: artifacts
+          mountPath: /app/artifacts
+          readOnly: true
+      
+      volumes:
+      - name: models
+        hostPath:
+          path: /home/mlprod/models/latest/
+          type: Directory
+      - name: artifacts
+        hostPath:
+          path: /home/mlprod/artifacts
+          type: Directory

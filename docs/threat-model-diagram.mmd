@@ -1,0 +1,51 @@
+%% STRIDE Threat Model - Movie Recommendation System
+%% Attack Vectors: T1 (API Abuse), T2 (Data Poisoning)
+
+flowchart TB
+    subgraph External["External Boundary"]
+        Users["External Users"]
+        Attacker["Adversary"]
+    end
+    
+    subgraph DMZ["DMZ / Load Balancer"]
+        nginx["nginx Reverse Proxy"]
+    end
+    
+    subgraph K8s["Kubernetes Cluster"]
+        svc["K8s Service :30082"]
+        subgraph Pods["Flask Pods x3"]
+            pod1["Pod 1: ALS/PopGen"]
+            pod2["Pod 2: ALS/PopGen"]
+            pod3["Pod 3: ALS/PopGen"]
+        end
+        models[("Model Artifacts\n/models/latest/")]
+    end
+    
+    subgraph DataPipeline["Data Pipeline"]
+        kafka[("Kafka\nmovielog13")]
+        retrain["Retrain Pipeline\n(Jenkins 3-day cron)"]
+        validate["Data Validation\n(schema only)"]
+    end
+    
+    subgraph Monitoring["Monitoring Stack"]
+        prom["Prometheus"]
+        grafana["Grafana"]
+    end
+    
+    Users -->|"GET /recommend/user_id"| nginx
+    Attacker -->|"T1: Flood Requests"| nginx
+    Attacker -.->|"T2: Inject Events"| kafka
+    nginx --> svc
+    svc --> Pods
+    pod1 & pod2 & pod3 --> models
+    kafka --> retrain
+    retrain --> validate
+    validate -->|"No anomaly detection"| retrain
+    retrain -->|"Update symlink"| models
+    Pods -->|"/metrics"| prom
+    prom --> grafana
+    
+    style Attacker fill:#ff6b6b,stroke:#c92a2a,color:#fff
+    style kafka fill:#ffd43b,stroke:#fab005
+    style validate fill:#ffd43b,stroke:#fab005
+    style nginx fill:#74c0fc,stroke:#1971c2
