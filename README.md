@@ -1,4 +1,4 @@
-# Movie recommendation service
+# Production-Scale-Movie-Recommendation-Service
 
 This repo contains 2 models for recommending movies to users:
 1. Model 1: Alternating Least Squares
